@@ -20,6 +20,7 @@ import { useApp } from '../../context/AppContext';
 import { MarkdownRenderer } from '../common/MarkdownRenderer';
 import { safeCopyToClipboard } from '../../utils/safeHelpers';
 import { ActivityTrackingService } from '../../services/activityTrackingService';
+import { generateNotesWithAutoRetry } from '../../services/geminiClientService';
 
 interface PracticeQuestion {
   question: string;
@@ -144,25 +145,17 @@ export const AiNotesGenerator: React.FC = () => {
 
     setIsLoading(true);
     try {
-      const response = await fetch('/api/generate-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic,
-          examLevel,
-          language,
-          format: 'comprehensive'
-        })
+      const result = await generateNotesWithAutoRetry({
+        topic,
+        examLevel,
+        language
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data.notes) {
-          setGeneratedNotes(data.notes);
-          setSourceType(data.source || 'gemini');
-          addToast('नोट्स सफलतापूर्वक लोड भयो!', 'success');
-          return;
-        }
+      if (result && result.notes) {
+        setGeneratedNotes(result.notes);
+        setSourceType(result.source || 'gemini');
+        addToast('नोट्स सफलतापूर्वक लोड भयो!', 'success');
+        return;
       }
       throw new Error('API unavailable, switching to curated mockup notes');
     } catch (err: any) {

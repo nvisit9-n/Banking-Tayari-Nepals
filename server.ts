@@ -116,11 +116,18 @@ app.get(["/auth/google/callback", "/auth/google/callback/", "/auth/callback", "/
 });
 
 // Lazy initialize Gemini client
+let cachedApiKey: string | null = null;
 let genAI: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  const apiKey = (
+    process.env.GEMINI_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    process.env.NEXT_PUBLIC_GEMINI_API_KEY ||
+    ""
+  ).trim();
   if (!apiKey) return null;
-  if (!genAI) {
+  if (!genAI || cachedApiKey !== apiKey) {
+    cachedApiKey = apiKey;
     genAI = new GoogleGenAI({
       apiKey,
       httpOptions: {
@@ -180,19 +187,27 @@ Target Exam Level: ${examLevel}
 Language Preference: ${language}
 Format Style: ${format}`;
 
-        const response = await ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: prompt,
-          config: {
-            systemInstruction,
-            responseMimeType: "application/json",
-            temperature: 0.2,
-          },
-        });
+        const noteModels = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-3.8-flash"];
+        for (const modelName of noteModels) {
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+              config: {
+                systemInstruction,
+                responseMimeType: "application/json",
+                temperature: 0.2,
+              },
+            });
 
-        if (response.text) {
-          notesData = JSON.parse(response.text);
-          source = "gemini";
+            if (response.text) {
+              notesData = JSON.parse(response.text);
+              source = "gemini";
+              break;
+            }
+          } catch (modelErr: any) {
+            console.warn(`Note model ${modelName} error, trying next...`);
+          }
         }
       } catch (aiErr: any) {
         console.warn("Gemini generation temporarily unavailable, falling back to curated notes:", aiErr?.message || aiErr);
@@ -555,7 +570,7 @@ app.post("/api/ai-assistant-stream", async (req, res) => {
   });
 
   if (ai) {
-    const candidateModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
+    const candidateModels = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
     const contents = buildGeminiContents(cleanQuery, history, activeAttachment);
 
     for (const modelName of candidateModels) {
@@ -641,7 +656,7 @@ app.post("/api/ai-assistant", async (req, res) => {
     const effectiveSystemInstruction = getAiSystemInstruction(level, mode, cleanQuery);
 
     if (ai) {
-      const candidateModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
+      const candidateModels = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"];
       const contents = buildGeminiContents(cleanQuery, history, activeAttachment);
 
       for (const modelName of candidateModels) {

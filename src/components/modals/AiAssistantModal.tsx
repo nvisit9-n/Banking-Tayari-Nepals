@@ -35,6 +35,10 @@ import {
   AiChatSessionService, 
   generateChatTopicTitle 
 } from '../../services/aiChatSessionService';
+import { 
+  executeAiQueryWithAutoRetry, 
+  getOfflineKnowledgeFallback 
+} from '../../services/geminiClientService';
 
 interface AttachedFile {
   type: 'image' | 'pdf';
@@ -95,6 +99,7 @@ export const AiAssistantModal: React.FC = () => {
   const [currentAiMessageId, setCurrentAiMessageId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<AttachedFile | null>(null);
+  const [retryNotice, setRetryNotice] = useState<string | null>(null);
 
   // Audio / TTS state
   const [ttsState, setTtsState] = useState<{ isPlaying: boolean; messageId: string | null }>({
@@ -448,7 +453,7 @@ export const AiAssistantModal: React.FC = () => {
     };
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     try {
       // Build history payload for Gemini context
@@ -457,119 +462,48 @@ export const AiAssistantModal: React.FC = () => {
         text: m.text
       }));
 
-      const payload: any = {
+      const attachmentPayload = fileToSend ? {
+        data: fileToSend.base64,
+        mimeType: fileToSend.mimeType,
+        name: fileToSend.name
+      } : undefined;
+
+      const finalText = await executeAiQueryWithAutoRetry({
         query: promptText,
         history: historyPayload,
+        attachment: attachmentPayload,
         level: detectedLevel,
-        mode: sessionMode
-      };
-
-      if (fileToSend) {
-        payload.attachment = {
-          data: fileToSend.base64,
-          mimeType: fileToSend.mimeType,
-          name: fileToSend.name
-        };
-      }
-
-      const response = await fetch('/api/ai-assistant-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
+        mode: sessionMode,
+        signal: controller.signal,
+        onRetry: (attempt, max) => {
+          setRetryNotice(`पुनः जडान प्रयास गरिँदैछ (${attempt}/${max})...`);
+        },
+        onChunk: (_chunk, accumulated) => {
+          setRetryNotice(null);
+          setCurrentSession(prev => {
+            if (!prev) return prev;
+            const newMsgs = prev.messages.map(m =>
+              m.id === aiTempId ? { ...m, text: accumulated } : m
+            );
+            return { ...prev, messages: newMsgs };
+          });
+        }
       });
 
-      if (!response.ok || !response.body) {
-        throw new Error(`HTTP Error ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buffer = '';
-      let accumulatedAiText = '';
-      let streamCompleted = false;
-
-      while (!streamCompleted) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const dataStr = trimmed.slice(5).trim();
-          if (dataStr === '[DONE]') {
-            streamCompleted = true;
-            break;
-          }
-          try {
-            const parsed = JSON.parse(dataStr);
-            if (parsed.error) {
-              throw new Error(parsed.error);
-            }
-            if (parsed.chunk) {
-              accumulatedAiText += parsed.chunk;
-              const currentText = accumulatedAiText;
-              setCurrentSession(prev => {
-                if (!prev) return prev;
-                const newMsgs = prev.messages.map(m =>
-                  m.id === aiTempId ? { ...m, text: currentText } : m
-                );
-                return { ...prev, messages: newMsgs };
-              });
-            }
-          } catch (pErr: any) {
-            if (pErr?.message && pErr.message !== 'Unexpected end of JSON input') {
-              throw pErr;
-            }
-          }
-        }
-      }
-
       clearTimeout(timeoutId);
-
-      const finalText = accumulatedAiText.trim() || 'माफ गर्नुहोस्, उत्तर प्राप्त हुन सकेन। कृपया पुनः प्रयास गर्नुहोस्।';
-      finalizeAiMessage(finalText, false);
+      setRetryNotice(null);
+      finalizeAiMessage(finalText || 'माफ गर्नुहोस्, उत्तर प्राप्त हुन सकेन। कृपया पुनः प्रयास गर्नुहोस्।', false);
 
     } catch (streamErr: any) {
       clearTimeout(timeoutId);
-      console.warn('Streaming error, invoking non-streaming fallback:', streamErr);
-      try {
-        const fallbackRes = await fetch('/api/ai-assistant', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: promptText,
-            history: activeSession.messages.slice(-10).map(m => ({ sender: m.sender, text: m.text })),
-            attachment: fileToSend ? {
-              data: fileToSend.base64,
-              mimeType: fileToSend.mimeType,
-              name: fileToSend.name
-            } : undefined,
-            level: examLevel,
-            mode: sessionMode
-          })
-        });
-
-        const data = await fallbackRes.json();
-        const fallbackText = data.answer || 'माफ गर्नुहोस्, सेवामा लोड छ। कृपया केही सेकेन्डपछि पुनः प्रश्न सोध्नुहोस्।';
-        finalizeAiMessage(fallbackText, false);
-      } catch (fbErr: any) {
-        console.error('AI assistant complete error:', fbErr);
-        const errorText = 
-          `⚠️ **सम्पर्कमा क्षणिक समस्या (Temporary Connection Issue)**\n\n` +
-          `AI अध्ययन सेवा वा सर्भरसँग सम्पर्क हुन सकेन।\n\n` +
-          `- कृपया तपाईंको इन्टरनेट जडान जाँच गर्नुहोस्।\n` +
-          `- सर्भरमा लोड भएको हुनसक्छ, केही सेकेन्डपछि पुनः प्रयास गर्नुहोस्।`;
-        finalizeAiMessage(errorText, true);
-        if (addToast) addToast('सर्भर वा AI सेवासँग सम्पर्क हुन सकेन।', 'error');
-      }
+      setRetryNotice(null);
+      console.warn('Network error handled gracefully; providing syllabus knowledge fallback:', streamErr);
+      const fallbackText = getOfflineKnowledgeFallback(promptText);
+      finalizeAiMessage(fallbackText, false);
     } finally {
       setIsTyping(false);
       setCurrentAiMessageId(null);
+      setRetryNotice(null);
     }
   };
 
@@ -932,7 +866,7 @@ export const AiAssistantModal: React.FC = () => {
               {isTyping && (!currentAiMessageId || !messages.some(m => m.id === currentAiMessageId && !m.text)) && (
                 <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 p-2">
                   <Sparkles className="w-3.5 h-3.5 animate-spin text-amber-500" />
-                  <span className="font-medium">AI अध्ययन साथीले उत्तर प्रवाह गर्दैछ...</span>
+                  <span className="font-medium">{retryNotice || 'AI अध्ययन साथीले उत्तर प्रवाह गर्दैछ...'}</span>
                 </div>
               )}
               <div ref={messagesEndRef} />
