@@ -4,7 +4,6 @@ import {
   X, 
   Send, 
   Bot, 
-  CheckSquare, 
   Copy, 
   Check, 
   Paperclip, 
@@ -26,8 +25,6 @@ import {
   Clock
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { QuizSet } from '../../types';
-import { MOCK_QUESTIONS } from '../../data/mockData';
 import { MarkdownRenderer } from '../common/MarkdownRenderer';
 import { safeCopyToClipboard } from '../../utils/safeHelpers';
 import { nepaliTts } from '../../utils/nepaliTts';
@@ -54,8 +51,36 @@ const formatFileSize = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+const detectExamLevelFromPrompt = (prompt: string, fallback: ExamLevel = 'level4-5'): ExamLevel => {
+  const p = prompt.toLowerCase();
+  if (
+    p.includes('तह ९') || p.includes('तह १०') || p.includes('level 9') || p.includes('level 10') ||
+    p.includes('प्रबन्धक') || p.includes('निर्देशक') || p.includes('उप-निर्देशक') ||
+    p.includes('उपनिर्देशक') || p.includes('director') || p.includes('manager') ||
+    p.includes('basel') || p.includes('macro-prudential') || p.includes('म्याक्रो')
+  ) {
+    return 'level9-10';
+  }
+  if (
+    p.includes('तह ६') || p.includes('तह ७') || p.includes('तह ८') ||
+    p.includes('level 6') || p.includes('level 7') || p.includes('level 8') ||
+    p.includes('अधिकृत') || p.includes('officer') || p.includes('वरिष्ठ अधिकृत') ||
+    p.includes('शाखा अधिकृत') || p.includes('सहायक प्रबन्धक') || p.includes('नीतिगत') ||
+    p.includes('governance') || p.includes('सुशासन')
+  ) {
+    return 'level6-8';
+  }
+  if (
+    p.includes('तह ४') || p.includes('तह ५') || p.includes('level 4') || p.includes('level 5') ||
+    p.includes('सहायक') || p.includes('assistant') || p.includes('खरिदार') || p.includes('नासु') || p.includes('नायब सुब्बा')
+  ) {
+    return 'level4-5';
+  }
+  return fallback;
+};
+
 export const AiAssistantModal: React.FC = () => {
-  const { isAiModalOpen, setIsAiModalOpen, startQuiz, user, addToast } = useApp();
+  const { isAiModalOpen, setIsAiModalOpen, user, addToast } = useApp();
 
   // Sessions and Active Thread State
   const [sessions, setSessions] = useState<AiChatSession[]>([]);
@@ -340,6 +365,12 @@ export const AiAssistantModal: React.FC = () => {
       activeSession = AiChatSessionService.createNewSession(examLevel, sessionMode);
     }
 
+    // Auto-detect exam depth dynamically from prompt keywords
+    const detectedLevel = detectExamLevelFromPrompt(promptText, activeSession.level || examLevel);
+    if (detectedLevel !== examLevel) {
+      setExamLevel(detectedLevel);
+    }
+
     // 2. Safely auto-generate topic title on first user message without blocking generation
     const isFirstUserMessage = !activeSession.messages.some(m => m.sender === 'user') || activeSession.title === 'नयाँ कुराकानी';
     const sessionTitle = isFirstUserMessage
@@ -377,7 +408,7 @@ export const AiAssistantModal: React.FC = () => {
       id: activeSession.id,
       title: sessionTitle,
       updatedAt: Date.now(),
-      level: examLevel,
+      level: detectedLevel,
       mode: sessionMode,
       messages: updatedMessages,
       messageCount: updatedMessages.length
@@ -429,7 +460,7 @@ export const AiAssistantModal: React.FC = () => {
       const payload: any = {
         query: promptText,
         history: historyPayload,
-        level: examLevel,
+        level: detectedLevel,
         mode: sessionMode
       };
 
@@ -571,38 +602,11 @@ export const AiAssistantModal: React.FC = () => {
     }
   };
 
-  const handleStartAiQuiz = () => {
-    setIsAiModalOpen(false);
-    nepaliTts.stop();
-    const quizSet: QuizSet = {
-      id: `ai-quiz-${Date.now()}`,
-      title: 'AI टपर मेन्टर - विशेष अभ्यास क्विज',
-      description: 'छलफल गरिएका बैंकिङ तथा लोकसेवा विषयहरूमा आधारित १० वटा मानक अभ्यास प्रश्नहरू',
-      category: 'Banking',
-      difficulty: 'Medium',
-      mode: 'practice',
-      timeLimitMinutes: 5,
-      questions: MOCK_QUESTIONS.slice(0, 10),
-      badge: 'Topper Quiz'
-    };
-    startQuiz(quizSet);
-  };
-
-  const samplePrompts = [
-    '📈 माग र पूर्ति वक्र (Demand & Supply Equilibrium ASCII)',
-    '📊 लागत वक्र (AC, MC, AVC Cost Curves Diagram)',
-    '📜 नेपाल राष्ट्र बैंक ऐन २०५८ (दफा ४ र ५ विश्लेषण)',
-    '🏦 BAFIA २०७३ अनुसार बैंक वर्गीकरण र चुक्ता पूँजी',
-    '🛡️ सम्पत्ति शुद्धीकरण (AML/CFT) र CTR/STR दायित्व',
-    '⚡ NEA/NTC/CIT/EPF संस्थान पाठ्यक्रम तथा सेवा नियम',
-    '🧮 बैंकिङ हिसाब तथा सूत्र संग्रह (BRS, NPL, CAR, Compound Interest)'
-  ];
-
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex flex-col sm:items-center sm:justify-center p-0 sm:p-3 md:p-6 animate-fadeIn">
       <div className="bg-white dark:bg-slate-900 w-full sm:max-w-5xl h-[100dvh] sm:h-[90vh] sm:max-h-[920px] rounded-none sm:rounded-3xl border-0 sm:border sm:border-slate-200 dark:sm:border-slate-800 shadow-2xl flex flex-col overflow-hidden transition-all">
         
-        {/* Top Header Bar */}
+        {/* Top Header Bar (Clean Gemini Style) */}
         <header className="pt-safe px-3 sm:px-4 py-2.5 sm:py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-900/95 shrink-0 z-20">
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             {/* Sidebar Toggle Button (Gemini Style) */}
@@ -627,9 +631,6 @@ export const AiAssistantModal: React.FC = () => {
                 <span className="px-1.5 py-0.5 rounded-md bg-amber-500/20 text-amber-800 dark:text-amber-300 text-[9px] font-bold shrink-0">
                   Gemini Flash
                 </span>
-                <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 text-[9px] font-bold shrink-0 hidden md:inline">
-                  ४५+ संस्थान
-                </span>
               </div>
               <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate max-w-[200px] sm:max-w-xs">
                 {currentSession?.title || 'बैंकिङ तथा लोकसेवा परीक्षा तयारी'}
@@ -637,54 +638,17 @@ export const AiAssistantModal: React.FC = () => {
             </div>
           </div>
 
-          {/* Level Adaptive Selector & Controls */}
+          {/* Clean Action Controls */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            {/* Exam Level Selector Pills */}
-            <div className="hidden sm:flex items-center bg-slate-200/70 dark:bg-slate-800 p-0.5 rounded-xl text-[10px] sm:text-xs font-bold">
-              <button
-                onClick={() => handleLevelChange('level4-5')}
-                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
-                  examLevel === 'level4-5'
-                    ? 'bg-white dark:bg-slate-700 text-emerald-700 dark:text-emerald-300 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                }`}
-                title="तह ४-५ (सहायक/खरिदार/नायब सुब्बा)"
-              >
-                तह ४-५
-              </button>
-              <button
-                onClick={() => handleLevelChange('level6-8')}
-                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
-                  examLevel === 'level6-8'
-                    ? 'bg-white dark:bg-slate-700 text-indigo-700 dark:text-indigo-300 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                }`}
-                title="तह ६-८ (अधिकृत/वरिष्ठ अधिकृत)"
-              >
-                तह ६-८
-              </button>
-              <button
-                onClick={() => handleLevelChange('level9-10')}
-                className={`px-2 py-1 rounded-lg transition cursor-pointer ${
-                  examLevel === 'level9-10'
-                    ? 'bg-white dark:bg-slate-700 text-amber-700 dark:text-amber-300 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
-                }`}
-                title="तह ९-१० (प्रबन्धक/उप-निर्देशक/निर्देशक)"
-              >
-                तह ९-१०
-              </button>
-            </div>
-
             {/* Global TTS Stop if currently playing */}
             {ttsState.isPlaying && (
               <button
                 onClick={() => nepaliTts.stop()}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-400 text-[10px] font-bold animate-pulse cursor-pointer border border-rose-300 dark:border-rose-800"
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-600 dark:text-rose-400 text-[10px] font-bold animate-pulse cursor-pointer border border-rose-300 dark:border-rose-800"
                 title="आवाज बन्द गर्नुहोस् (Stop Speech)"
               >
                 <VolumeX className="w-3.5 h-3.5" />
-                <span className="hidden xs:inline">बोल्दैछ...</span>
+                <span className="hidden xs:inline">आवाज बन्द</span>
               </button>
             )}
 
@@ -917,7 +881,7 @@ export const AiAssistantModal: React.FC = () => {
                       </div>
                     )}
 
-                    {/* AI Message Footer Toolbar with Nepali Voice (TTS), Copy & Quiz */}
+                    {/* AI Message Footer Toolbar with Nepali Voice (TTS) & Copy */}
                     {msg.sender === 'ai' && msg.text && !msg.isError && (
                       <div className="pt-2 sm:pt-3 mt-2 sm:mt-3 border-t border-slate-200 dark:border-slate-700/60 flex items-center justify-between text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 gap-2 flex-wrap">
                         <div className="flex items-center gap-3">
@@ -953,15 +917,6 @@ export const AiAssistantModal: React.FC = () => {
                             <span>{copiedId === msg.id ? 'कपी भयो' : 'कपी'}</span>
                           </button>
                         </div>
-
-                        {/* Start Quiz on Topic */}
-                        <button
-                          onClick={handleStartAiQuiz}
-                          className="flex items-center gap-1 font-bold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
-                        >
-                          <CheckSquare className="w-3.5 h-3.5" />
-                          <span>यसबाट Quiz खेल्नुहोस्</span>
-                        </button>
                       </div>
                     )}
                   </div>
@@ -981,19 +936,6 @@ export const AiAssistantModal: React.FC = () => {
                 </div>
               )}
               <div ref={messagesEndRef} />
-            </div>
-
-            {/* Quick Topic Prompts (Economics Graphs, Acts, Math) */}
-            <div className="py-2 px-2.5 sm:px-4 bg-slate-50 dark:bg-slate-800/40 border-t border-slate-200 dark:border-slate-800 overflow-x-auto whitespace-nowrap flex gap-1.5 sm:gap-2 scrollbar-none shrink-0">
-              {samplePrompts.map((p, pIdx) => (
-                <button
-                  key={pIdx}
-                  onClick={() => handleSendPrompt(p)}
-                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-lg sm:rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-[10px] sm:text-[11px] font-medium hover:border-amber-500 dark:hover:border-amber-400 transition shrink-0 cursor-pointer shadow-2xs"
-                >
-                  {p}
-                </button>
-              ))}
             </div>
 
             {/* Speech Notice Banner */}
