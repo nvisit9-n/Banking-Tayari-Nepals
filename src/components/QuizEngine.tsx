@@ -696,38 +696,37 @@ export const QuizEngine: React.FC<QuizEngineProps> = ({
       console.error('Failed to log admin analytics', e);
     }
 
-    // Persist authenticated exam score & activity to Firestore / Server tracking
-    if (user && !user.isGuest) {
-      ActivityTrackingService.logExamScore({
-        user,
-        quizId: activeQuiz.id,
-        quizTitle: activeQuiz.title,
-        category: activeQuiz.category || currentQuestion?.category || 'General Banking',
-        totalQuestions: questions.length,
-        attempted: finalCorrect + finalIncorrect,
+    // Persist exam score & activity to Firebase (RTDB & Firestore) / Server tracking for ALL users (guests and authenticated)
+    ActivityTrackingService.logExamScore({
+      user,
+      quizId: activeQuiz.id,
+      quizTitle: activeQuiz.title,
+      category: activeQuiz.category || currentQuestion?.category || 'General Banking',
+      totalQuestions: questions.length,
+      attempted: finalCorrect + finalIncorrect,
+      correct: finalCorrect,
+      incorrect: finalIncorrect,
+      skipped: finalUnattempted,
+      netScore: netFinalScore,
+      accuracy: Math.round(accuracy * 10) / 10,
+      timeTakenSeconds: totalSecondsSpent
+    }).catch(() => {});
+
+    ActivityTrackingService.logActivity({
+      user,
+      activityType: 'exam_complete',
+      targetId: activeQuiz.id,
+      targetTitle: activeQuiz.title,
+      details: `परीक्षा सम्पन्न: प्राप्ताङ्क ${netFinalScore}/${questions.length} (${Math.round(accuracy)}% शुद्धता)`,
+      metadata: {
+        netScore: netFinalScore,
+        total: questions.length,
         correct: finalCorrect,
         incorrect: finalIncorrect,
-        skipped: finalUnattempted,
-        netScore: netFinalScore,
-        accuracy: Math.round(accuracy * 10) / 10,
-        timeTakenSeconds: totalSecondsSpent
-      }).catch(() => {});
-
-      ActivityTrackingService.logActivity({
-        user,
-        activityType: 'exam_complete',
-        targetId: activeQuiz.id,
-        targetTitle: activeQuiz.title,
-        details: `परीक्षा सम्पन्न: प्राप्ताङ्क ${netFinalScore}/${questions.length} (${Math.round(accuracy)}% शुद्धता)`,
-        metadata: {
-          netScore: netFinalScore,
-          total: questions.length,
-          correct: finalCorrect,
-          incorrect: finalIncorrect,
-          accuracy
-        }
-      }).catch(() => {});
-    }
+        accuracy,
+        isGuest: Boolean(user?.isGuest)
+      }
+    }).catch(() => {});
 
     refreshUser();
 

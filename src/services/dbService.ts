@@ -1,5 +1,6 @@
 import { doc, setDoc, addDoc, collection } from 'firebase/firestore';
-import { db } from '../firebase';
+import { ref, set } from 'firebase/database';
+import { db, rtdb } from '../firebase';
 import { UserProfile, AdminAnalyticsRecord, Question, StudyNote, RawSangathitSet, LeaderboardEntry } from '../types';
 import { safeStorage } from '../utils/safeHelpers';
 import { StorageService } from './storageService';
@@ -441,30 +442,53 @@ export class DbService {
   }
 
   private static async pushAnalyticsToCloud(record: AdminAnalyticsRecord): Promise<void> {
-    // 1. Real-time direct logging to Firestore `exam_submissions` collection
+    const submissionPayload = {
+      id: record.id,
+      userId: record.userId,
+      userName: record.userName,
+      userEmail: record.userId.includes('@') ? record.userId : '',
+      district: record.district || 'काठमाडौँ',
+      targetExam: record.targetExam || 'General Banking',
+      quizId: record.quizId,
+      quizTitle: record.quizTitle,
+      category: record.category || 'General Banking',
+      score: record.netScore,
+      netScore: record.netScore,
+      totalQuestions: record.totalQuestions,
+      attemptedCount: record.attemptedCount,
+      correctAnswers: record.correctAnswers,
+      incorrectAnswers: record.incorrectAnswers,
+      skippedCount: record.skippedCount,
+      negativeDeduction: record.negativeDeduction,
+      accuracy: record.accuracy,
+      timeTakenSeconds: record.timeElapsedSeconds,
+      timeElapsedSeconds: record.timeElapsedSeconds,
+      timestamp: record.timestamp,
+      submittedAt: record.timestamp
+    };
+
+    // 1. Real-time direct logging to Firebase Realtime Database
+    try {
+      if (rtdb) {
+        set(ref(rtdb, `global_exam_results/${record.id}`), submissionPayload).catch(() => {});
+        set(ref(rtdb, `exam_submissions/${record.id}`), submissionPayload).catch(() => {});
+        if (record.userId) {
+          set(ref(rtdb, `users/${record.userId}/exam_results/${record.id}`), submissionPayload).catch(() => {});
+          set(ref(rtdb, `users/${record.userId}/latestSubmission`), submissionPayload).catch(() => {});
+        }
+      }
+    } catch (rtdbErr) {
+      console.warn('RTDB exam logging notice:', rtdbErr);
+    }
+
+    // 2. Real-time direct logging to Firestore `global_exam_results` and `exam_submissions` collections
     try {
       if (db) {
-        const submissionPayload = {
-          id: record.id,
-          userId: record.userId,
-          userName: record.userName,
-          userEmail: record.userId.includes('@') ? record.userId : '',
-          quizId: record.quizId,
-          quizTitle: record.quizTitle,
-          category: record.category || 'General Banking',
-          score: record.netScore,
-          totalQuestions: record.totalQuestions,
-          attemptedCount: record.attemptedCount,
-          correctAnswers: record.correctAnswers,
-          incorrectAnswers: record.incorrectAnswers,
-          skippedCount: record.skippedCount,
-          negativeDeduction: record.negativeDeduction,
-          accuracy: record.accuracy,
-          timeTakenSeconds: record.timeElapsedSeconds,
-          timestamp: record.timestamp,
-          submittedAt: record.timestamp
-        };
+        addDoc(collection(db, 'global_exam_results'), submissionPayload).catch(() => {});
         addDoc(collection(db, 'exam_submissions'), submissionPayload).catch(() => {});
+        if (record.userId) {
+          addDoc(collection(db, `users/${record.userId}/exam_results`), submissionPayload).catch(() => {});
+        }
       }
     } catch (fsErr) {
       console.warn('Firestore exam_submissions recording notice:', fsErr);

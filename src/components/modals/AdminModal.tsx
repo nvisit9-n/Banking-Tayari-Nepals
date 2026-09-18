@@ -49,6 +49,7 @@ import {
   DownloadEventRecord, 
   ExamScoreRecord 
 } from '../../services/activityTrackingService';
+import { AdminAnalyticsService } from '../../services/adminAnalyticsService';
 
 export const AdminModal: React.FC = () => {
   const { isAdminModalOpen, setIsAdminModalOpen, logoutAdmin, purchases, addToast, user } = useApp();
@@ -140,7 +141,73 @@ export const AdminModal: React.FC = () => {
       reloadData();
       // Auto-poll visitor statistics every 10 seconds
       const pollTimer = setInterval(loadVisitorStats, 10000);
-      return () => clearInterval(pollTimer);
+
+      // Real-time listener for ALL registered users in Firebase (RTDB users/ node & Firestore)
+      const unsubUsers = AdminAnalyticsService.subscribeToRegisteredUsers((liveUsers) => {
+        if (liveUsers && liveUsers.length > 0) {
+          const mappedStudents: UserProfile[] = liveUsers.map(u => ({
+            id: u.id,
+            authUid: u.authUid,
+            email: u.email,
+            name: u.displayName,
+            displayName: u.displayName,
+            district: u.district || 'काठमाडौँ',
+            province: u.province || 'बागमती प्रदेश',
+            targetExam: u.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४',
+            avatarUrl: u.photoURL,
+            photoURL: u.photoURL,
+            registeredAt: u.registrationDate,
+            createdAt: u.registrationDate,
+            lastLoginAt: u.lastActive,
+            lastActiveDate: u.lastActive,
+            xp: u.totalXp,
+            level: Math.floor(u.totalXp / 100) + 1,
+            quizzesAttempted: u.quizzesCompleted,
+            quizzesCompleted: u.quizzesCompleted,
+            questionsSolved: u.questionsSolved,
+            streak: 1,
+            accuracy: 75,
+            rank: 'बैंकिङ साधक',
+            isPro: u.isPro,
+            isProUser: u.isPro
+          }));
+          setStudents(mappedStudents);
+          setSummary(prev => ({
+            ...prev,
+            totalStudents: Math.max(prev.totalStudents, liveUsers.length)
+          }));
+        }
+      });
+
+      // Real-time listener for ALL exam submissions across ALL users (RTDB global_exam_results, exam_submissions, users/*/exam_results, Firestore, and server)
+      const unsubExams = AdminAnalyticsService.subscribeToExamSubmissions((liveExams) => {
+        if (liveExams) {
+          const totalAttempts = liveExams.length;
+          let totalAccuracy = 0;
+          let totalScore = 0;
+          for (const e of liveExams) {
+            totalAccuracy += (e.accuracy ?? e.percentage ?? 0);
+            totalScore += (e.netScore ?? e.score ?? 0);
+          }
+          const avgAcc = totalAttempts > 0 ? Math.round(totalAccuracy / totalAttempts) : 0;
+          const avgScore = totalAttempts > 0 ? Math.round((totalScore / totalAttempts) * 100) / 100 : 0;
+          const analyticsRecords = liveExams.map(AdminAnalyticsService.mapExamRecordToAnalyticsRecord);
+
+          setSummary(prev => ({
+            ...prev,
+            totalAttempts,
+            averageAccuracy: avgAcc,
+            averageNetScore: avgScore,
+            recentRecords: analyticsRecords
+          }));
+        }
+      });
+
+      return () => {
+        clearInterval(pollTimer);
+        if (typeof unsubUsers === 'function') unsubUsers();
+        if (typeof unsubExams === 'function') unsubExams();
+      };
     }
   }, [isAdminModalOpen]);
 
@@ -710,17 +777,36 @@ export const AdminModal: React.FC = () => {
                         </td>
                       </tr>
                     ) : (
-                      summary.recentRecords.slice(0, 15).map(r => (
-                        <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                          <td className="p-3 font-bold text-slate-900 dark:text-white">{r.userName}</td>
-                          <td className="p-3">{r.district} • {r.targetExam}</td>
-                          <td className="p-3">{r.category || r.quizTitle}</td>
+                      summary.recentRecords.slice(0, 50).map(r => (
+                        <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                          <td className="p-3 font-bold text-slate-900 dark:text-white">
+                            <div>{r.userName}</div>
+                            {r.userId && r.userId.includes('@') && (
+                              <div className="text-[10px] text-slate-400 font-mono font-normal">{r.userId}</div>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            <div className="font-semibold text-slate-800 dark:text-slate-200">{r.district || 'नेपाल'}</div>
+                            <div className="text-[10px] text-slate-400">{r.targetExam || 'बैंकिङ सेवा'}</div>
+                          </td>
+                          <td className="p-3 text-slate-700 dark:text-slate-300">
+                            <div className="font-medium truncate max-w-[180px]">{r.quizTitle || r.category}</div>
+                            <div className="text-[10px] text-slate-400">{r.category}</div>
+                          </td>
                           <td className="p-3">
                             <span className="text-emerald-600 font-bold">{r.correctAnswers} सही</span> / <span className="text-rose-500 font-bold">{r.incorrectAnswers} गलत</span>
                           </td>
                           <td className="p-3 font-mono text-rose-500 font-bold">-{r.negativeDeduction}</td>
-                          <td className="p-3 font-bold text-emerald-600 dark:text-emerald-400">{r.netScore} / {r.totalQuestions}</td>
-                          <td className="p-3 text-slate-400 font-mono">{Math.floor(r.timeElapsedSeconds / 60)}m {r.timeElapsedSeconds % 60}s</td>
+                          <td className="p-3 font-bold text-emerald-600 dark:text-emerald-400">
+                            {r.netScore} / {r.totalQuestions}
+                            <span className="text-[10px] text-purple-500 block font-normal">({r.accuracy}%)</span>
+                          </td>
+                          <td className="p-3 text-slate-400 font-mono">
+                            <div>{Math.floor((r.timeElapsedSeconds || 0) / 60)}m {(r.timeElapsedSeconds || 0) % 60}s</div>
+                            <div className="text-[10px] text-slate-500">
+                              {new Date(r.timestamp).toLocaleDateString('ne-NP')} {new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </td>
                         </tr>
                       ))
                     )}

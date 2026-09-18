@@ -7,9 +7,11 @@ import {
   getDocs,
   Timestamp 
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { ref, onValue } from 'firebase/database';
+import { db, rtdb } from '../firebase';
 import { DbService } from './dbService';
 import { ActivityTrackingService } from './activityTrackingService';
+import { AdminAnalyticsRecord } from '../types';
 
 export interface AdminRegisteredUser {
   id: string;
@@ -30,6 +32,7 @@ export interface AdminRegisteredUser {
 
 export interface AdminExamRecord {
   id: string;
+  userId?: string;
   studentName: string;
   studentEmail: string;
   quizTitle: string;
@@ -38,11 +41,19 @@ export interface AdminExamRecord {
   attemptedCount: number;
   correctAnswers: number;
   incorrectAnswers: number;
+  skippedCount?: number;
+  negativeDeduction?: number;
   score: number; // Marks obtained
+  netScore?: number;
   percentage: number; // Accuracy %
+  accuracy?: number;
   timeTakenSeconds: number; // Completion time in seconds
+  timeElapsedSeconds?: number;
   timestamp: string; // Date & Time
   category: string;
+  district?: string;
+  targetExam?: string;
+  isGuest?: boolean;
 }
 
 export interface AdminNotesActivityRecord {
@@ -84,12 +95,14 @@ export class AdminAnalyticsService {
   }
 
   /**
-   * Real-time listener for registered and logged-in users from Firestore
+   * Real-time listener for registered and logged-in users from Firebase RTDB and Firestore
    */
   static subscribeToRegisteredUsers(
     onUpdate: (users: AdminRegisteredUser[]) => void
   ): () => void {
     let isUnsubscribed = false;
+    let rtdbUsers: AdminRegisteredUser[] = [];
+    let firestoreUsers: AdminRegisteredUser[] = [];
 
     // Load local baseline first
     const getLocalBaseline = (): AdminRegisteredUser[] => {
@@ -122,18 +135,86 @@ export class AdminAnalyticsService {
       onUpdate(initialBaseline);
     }
 
+    const emitMerged = () => {
+      if (isUnsubscribed) return;
+      const userMap = new Map<string, AdminRegisteredUser>();
+
+      // 1. Baseline
+      for (const u of initialBaseline) {
+        const key = (u.email ? u.email.toLowerCase() : u.id) || u.authUid;
+        if (key) userMap.set(key, u);
+      }
+      // 2. RTDB Users
+      for (const u of rtdbUsers) {
+        const key = (u.email ? u.email.toLowerCase() : u.id) || u.authUid;
+        if (key) userMap.set(key, u);
+      }
+      // 3. Firestore Users
+      for (const u of firestoreUsers) {
+        const key = (u.email ? u.email.toLowerCase() : u.id) || u.authUid;
+        if (key) userMap.set(key, u);
+      }
+
+      const merged = Array.from(userMap.values()).sort((a, b) => {
+        return new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime();
+      });
+
+      onUpdate(merged);
+    };
+
+    // 1. Subscribe to Firebase Realtime Database `users/` node
+    let rtdbUnsub: (() => void) | null = null;
+    try {
+      if (rtdb) {
+        const usersRef = ref(rtdb, 'users');
+        rtdbUnsub = onValue(usersRef, (snapshot) => {
+          if (isUnsubscribed) return;
+          const data = snapshot.val();
+          const list: AdminRegisteredUser[] = [];
+          if (data && typeof data === 'object') {
+            Object.entries(data).forEach(([key, val]: [string, any]) => {
+              if (!val || typeof val !== 'object') return;
+              list.push({
+                id: key,
+                authUid: val.authUid || key,
+                displayName: val.displayName || val.name || (val.email ? val.email.split('@')[0] : 'विद्यार्थी'),
+                email: val.email || '',
+                registrationDate: this.parseDate(val.createdAt || val.registeredAt),
+                lastActive: this.parseDate(val.lastLoginAt || val.updatedAt || val.lastActiveDate || val.createdAt),
+                totalXp: typeof val.xp === 'number' ? val.xp : 200,
+                quizzesCompleted: typeof val.quizzesAttempted === 'number' ? val.quizzesAttempted : (typeof val.quizzesCompleted === 'number' ? val.quizzesCompleted : 0),
+                questionsSolved: typeof val.questionsSolved === 'number' ? val.questionsSolved : 0,
+                targetExam: val.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४',
+                district: val.district || 'काठमाडौँ',
+                province: val.province || 'बागमती प्रदेश',
+                photoURL: val.photoURL || val.avatarUrl || '',
+                isPro: Boolean(val.isPro || val.role === 'pro' || val.isProUser)
+              });
+            });
+          }
+          rtdbUsers = list;
+          emitMerged();
+        }, (err) => {
+          console.warn('RTDB users listener notice:', err);
+        });
+      }
+    } catch (rtdbErr) {
+      console.warn('Could not attach RTDB users listener:', rtdbErr);
+    }
+
+    // 2. Subscribe to Firestore `users` collection
+    let fsUnsub: (() => void) | null = null;
     try {
       const usersCol = collection(db, 'users');
-      const unsubscribe = onSnapshot(
+      fsUnsub = onSnapshot(
         usersCol,
         (snapshot) => {
           if (isUnsubscribed) return;
-          const firestoreUsers: AdminRegisteredUser[] = [];
-
+          const list: AdminRegisteredUser[] = [];
           snapshot.forEach((docSnap) => {
             const data = docSnap.data();
             const id = docSnap.id;
-            firestoreUsers.push({
+            list.push({
               id,
               authUid: data.authUid || id,
               displayName: data.displayName || data.name || (data.email ? data.email.split('@')[0] : 'विद्यार्थी'),
@@ -144,55 +225,44 @@ export class AdminAnalyticsService {
               quizzesCompleted: typeof data.quizzesAttempted === 'number' ? data.quizzesAttempted : (typeof data.quizzesCompleted === 'number' ? data.quizzesCompleted : 0),
               questionsSolved: typeof data.questionsSolved === 'number' ? data.questionsSolved : 0,
               targetExam: data.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४',
-              district: data.district,
-              province: data.province,
-              photoURL: data.photoURL || data.avatarUrl,
+              district: data.district || 'काठमाडौँ',
+              province: data.province || 'बागमती प्रदेश',
+              photoURL: data.photoURL || data.avatarUrl || '',
               isPro: Boolean(data.isPro || data.role === 'pro' || data.isProUser)
             });
           });
-
-          // Merge firestore with baseline to ensure comprehensive visibility
-          const emailMap = new Map<string, AdminRegisteredUser>();
-          for (const u of initialBaseline) {
-            if (u.email) emailMap.set(u.email.toLowerCase(), u);
-            else emailMap.set(u.id, u);
-          }
-          for (const u of firestoreUsers) {
-            if (u.email) emailMap.set(u.email.toLowerCase(), u);
-            else emailMap.set(u.id, u);
-          }
-
-          const merged = Array.from(emailMap.values()).sort((a, b) => {
-            return new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime();
-          });
-
-          onUpdate(merged);
+          firestoreUsers = list;
+          emitMerged();
         },
         (error) => {
-          console.warn('Firestore users subscription notice (using local baseline):', error.message);
-          onUpdate(initialBaseline);
+          console.warn('Firestore users subscription notice:', error.message);
         }
       );
-
-      return () => {
-        isUnsubscribed = true;
-        unsubscribe();
-      };
     } catch (err) {
       console.warn('Could not attach Firestore users snapshot:', err);
-      return () => {
-        isUnsubscribed = true;
-      };
     }
+
+    return () => {
+      isUnsubscribed = true;
+      if (typeof rtdbUnsub === 'function') rtdbUnsub();
+      if (typeof fsUnsub === 'function') fsUnsub();
+    };
   }
 
   /**
-   * Real-time listener for Exam & Quiz Submissions
+   * Real-time listener for Exam & Quiz Submissions across ALL users from RTDB & Firestore
    */
   static subscribeToExamSubmissions(
     onUpdate: (exams: AdminExamRecord[]) => void
   ): () => void {
     let isUnsubscribed = false;
+
+    let rtdbGlobalExams: AdminExamRecord[] = [];
+    let rtdbSubmissions: AdminExamRecord[] = [];
+    let rtdbUserNestedExams: AdminExamRecord[] = [];
+    let firestoreGlobalExams: AdminExamRecord[] = [];
+    let firestoreSubmissions: AdminExamRecord[] = [];
+    let serverExams: AdminExamRecord[] = [];
 
     // Load local baseline exam submissions
     const getLocalBaseline = (): AdminExamRecord[] => {
@@ -203,21 +273,31 @@ export class AdminAnalyticsService {
         const list: AdminExamRecord[] = [];
 
         for (const s of localSubs) {
+          const totalQ = s.totalQuestions || 25;
+          const score = typeof s.score === 'number' ? s.score : 0;
           list.push({
             id: s.id,
+            userId: s.userId,
             studentName: s.userName || 'विद्यार्थी',
             studentEmail: s.userEmail || '',
             quizTitle: s.quizTitle || 'बैंकिङ सामान्य ज्ञान नमुना सेट',
             quizId: s.quizId || '',
-            totalQuestions: s.totalQuestions || 25,
-            attemptedCount: s.attemptedCount || s.totalQuestions || 25,
+            totalQuestions: totalQ,
+            attemptedCount: s.attemptedCount || totalQ,
             correctAnswers: s.correctAnswers || 0,
             incorrectAnswers: s.incorrectAnswers || 0,
-            score: s.score || 0,
-            percentage: s.accuracy || (s.totalQuestions > 0 ? Math.round((s.score / s.totalQuestions) * 100) : 0),
+            skippedCount: s.skippedCount ?? Math.max(0, totalQ - ((s.correctAnswers || 0) + (s.incorrectAnswers || 0))),
+            negativeDeduction: s.negativeDeduction ?? 0,
+            score: Math.round(score * 100) / 100,
+            netScore: Math.round(score * 100) / 100,
+            percentage: s.accuracy || (totalQ > 0 ? Math.round((score / totalQ) * 100) : 0),
+            accuracy: s.accuracy || 0,
             timeTakenSeconds: s.timeTakenSeconds || 300,
+            timeElapsedSeconds: s.timeTakenSeconds || 300,
             timestamp: s.submittedAt || s.timestamp || new Date().toISOString(),
-            category: s.category || 'General Banking'
+            category: s.category || 'General Banking',
+            district: (s as any).district || 'काठमाडौँ',
+            targetExam: (s as any).targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४'
           });
         }
 
@@ -225,6 +305,7 @@ export class AdminAnalyticsService {
           if (!list.some(item => item.id === r.id)) {
             list.push({
               id: r.id,
+              userId: r.userId,
               studentName: r.userName || 'विद्यार्थी',
               studentEmail: r.userId && r.userId.includes('@') ? r.userId : '',
               quizTitle: r.quizTitle || 'बैंकिङ नमुना परीक्षा',
@@ -233,11 +314,18 @@ export class AdminAnalyticsService {
               attemptedCount: r.attemptedCount || 25,
               correctAnswers: r.correctAnswers || 0,
               incorrectAnswers: r.incorrectAnswers || 0,
+              skippedCount: r.skippedCount,
+              negativeDeduction: r.negativeDeduction,
               score: r.netScore || 0,
+              netScore: r.netScore || 0,
               percentage: r.accuracy || 0,
+              accuracy: r.accuracy || 0,
               timeTakenSeconds: r.timeElapsedSeconds || 300,
+              timeElapsedSeconds: r.timeElapsedSeconds || 300,
               timestamp: r.timestamp || new Date().toISOString(),
-              category: r.category || 'Banking'
+              category: r.category || 'Banking',
+              district: r.district || 'काठमाडौँ',
+              targetExam: r.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४'
             });
           }
         }
@@ -254,104 +342,272 @@ export class AdminAnalyticsService {
       onUpdate(initialBaseline);
     }
 
+    const emitMerged = () => {
+      if (isUnsubscribed) return;
+      const idMap = new Map<string, AdminExamRecord>();
+
+      // Merge order: baseline -> server -> firestore -> rtdb (rtdb freshest)
+      for (const ex of initialBaseline) idMap.set(ex.id, ex);
+      for (const ex of serverExams) idMap.set(ex.id, ex);
+      for (const ex of firestoreSubmissions) idMap.set(ex.id, ex);
+      for (const ex of firestoreGlobalExams) idMap.set(ex.id, ex);
+      for (const ex of rtdbSubmissions) idMap.set(ex.id, ex);
+      for (const ex of rtdbUserNestedExams) idMap.set(ex.id, ex);
+      for (const ex of rtdbGlobalExams) idMap.set(ex.id, ex);
+
+      const merged = Array.from(idMap.values()).sort((a, b) => {
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      });
+
+      onUpdate(merged);
+    };
+
+    // Helper to map snapshot data to AdminExamRecord
+    const mapDocData = (id: string, data: any): AdminExamRecord => {
+      const totalQ = data.totalQuestions || 25;
+      const score = typeof data.score === 'number' ? data.score : (data.netScore || 0);
+      const percentage = typeof data.accuracy === 'number' 
+        ? data.accuracy 
+        : (totalQ > 0 ? Math.round((score / totalQ) * 100) : 0);
+
+      const correct = data.correctAnswers || 0;
+      const incorrect = data.incorrectAnswers || 0;
+      const skipped = data.skippedCount ?? Math.max(0, totalQ - (correct + incorrect));
+      const neg = data.negativeDeduction ?? Number((incorrect * 0.2).toFixed(2));
+      const timeSpent = data.timeTakenSeconds || data.timeElapsedSeconds || 240;
+
+      return {
+        id,
+        userId: data.userId || '',
+        studentName: data.userName || (data.userEmail ? data.userEmail.split('@')[0] : 'विद्यार्थी'),
+        studentEmail: data.userEmail || (data.userId && data.userId.includes('@') ? data.userId : ''),
+        quizTitle: data.quizTitle || 'बैंकिङ परीक्षा सेट',
+        quizId: data.quizId || '',
+        totalQuestions: totalQ,
+        attemptedCount: data.attemptedCount || totalQ,
+        correctAnswers: correct,
+        incorrectAnswers: incorrect,
+        skippedCount: skipped,
+        negativeDeduction: neg,
+        score: Math.round(score * 100) / 100,
+        netScore: Math.round(score * 100) / 100,
+        percentage: Math.min(100, Math.max(0, percentage)),
+        accuracy: Math.min(100, Math.max(0, percentage)),
+        timeTakenSeconds: timeSpent,
+        timeElapsedSeconds: timeSpent,
+        timestamp: this.parseDate(data.submittedAt || data.timestamp),
+        category: data.category || 'General Banking',
+        district: data.district || 'काठमाडौँ',
+        targetExam: data.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४',
+        isGuest: Boolean(data.isGuest)
+      };
+    };
+
+    // 1. RTDB `global_exam_results` subscription
+    let unsubRtdbGlobal: (() => void) | null = null;
+    try {
+      if (rtdb) {
+        const globalRef = ref(rtdb, 'global_exam_results');
+        unsubRtdbGlobal = onValue(globalRef, (snap) => {
+          if (isUnsubscribed) return;
+          const val = snap.val();
+          const list: AdminExamRecord[] = [];
+          if (val && typeof val === 'object') {
+            Object.entries(val).forEach(([key, d]: [string, any]) => {
+              if (d && typeof d === 'object') {
+                list.push(mapDocData(key, d));
+              }
+            });
+          }
+          rtdbGlobalExams = list;
+          emitMerged();
+        }, (err) => {
+          console.warn('RTDB global_exam_results notice:', err);
+        });
+      }
+    } catch (e) {
+      console.warn('Could not listen to RTDB global_exam_results:', e);
+    }
+
+    // 2. RTDB `exam_submissions` subscription
+    let unsubRtdbSubs: (() => void) | null = null;
+    try {
+      if (rtdb) {
+        const subsRef = ref(rtdb, 'exam_submissions');
+        unsubRtdbSubs = onValue(subsRef, (snap) => {
+          if (isUnsubscribed) return;
+          const val = snap.val();
+          const list: AdminExamRecord[] = [];
+          if (val && typeof val === 'object') {
+            Object.entries(val).forEach(([key, d]: [string, any]) => {
+              if (d && typeof d === 'object') {
+                list.push(mapDocData(key, d));
+              }
+            });
+          }
+          rtdbSubmissions = list;
+          emitMerged();
+        }, (err) => {
+          console.warn('RTDB exam_submissions notice:', err);
+        });
+      }
+    } catch (e) {
+      console.warn('Could not listen to RTDB exam_submissions:', e);
+    }
+
+    // 3. RTDB `users` node: extract nested `exam_results` from ALL users
+    let unsubRtdbUsers: (() => void) | null = null;
+    try {
+      if (rtdb) {
+        const usersRef = ref(rtdb, 'users');
+        unsubRtdbUsers = onValue(usersRef, (snap) => {
+          if (isUnsubscribed) return;
+          const val = snap.val();
+          const list: AdminExamRecord[] = [];
+          if (val && typeof val === 'object') {
+            Object.entries(val).forEach(([uid, uData]: [string, any]) => {
+              if (!uData || typeof uData !== 'object') return;
+              // Check nested exam_results
+              if (uData.exam_results && typeof uData.exam_results === 'object') {
+                Object.entries(uData.exam_results).forEach(([resId, resData]: [string, any]) => {
+                  if (resData && typeof resData === 'object') {
+                    list.push(mapDocData(resId, {
+                      userId: uid,
+                      userName: uData.displayName || uData.name,
+                      userEmail: uData.email,
+                      district: uData.district,
+                      targetExam: uData.targetExam,
+                      ...resData
+                    }));
+                  }
+                });
+              }
+              // Check latestSubmission
+              if (uData.latestSubmission && typeof uData.latestSubmission === 'object') {
+                const ls = uData.latestSubmission;
+                const subId = ls.id || `sub-user-${uid}`;
+                list.push(mapDocData(subId, {
+                  userId: uid,
+                  userName: uData.displayName || uData.name,
+                  userEmail: uData.email,
+                  district: uData.district,
+                  targetExam: uData.targetExam,
+                  ...ls
+                }));
+              }
+            });
+          }
+          rtdbUserNestedExams = list;
+          emitMerged();
+        }, (err) => {
+          console.warn('RTDB users nested exams notice:', err);
+        });
+      }
+    } catch (e) {
+      console.warn('Could not listen to RTDB users for nested exams:', e);
+    }
+
+    // 4. Firestore `global_exam_results` collection
+    let unsubFsGlobal: (() => void) | null = null;
+    try {
+      const globalCol = collection(db, 'global_exam_results');
+      const q = query(globalCol, limit(200));
+      unsubFsGlobal = onSnapshot(q, (snapshot) => {
+        if (isUnsubscribed) return;
+        const list: AdminExamRecord[] = [];
+        snapshot.forEach(docSnap => {
+          list.push(mapDocData(docSnap.id, docSnap.data()));
+        });
+        firestoreGlobalExams = list;
+        emitMerged();
+      }, () => {});
+    } catch {}
+
+    // 5. Firestore `exam_submissions` collection
+    let unsubFsSubs: (() => void) | null = null;
     try {
       const submissionsCol = collection(db, 'exam_submissions');
       const q = query(submissionsCol, limit(200));
-
-      const unsubscribe = onSnapshot(
-        q,
-        (snapshot) => {
-          if (isUnsubscribed) return;
-          const firestoreExams: AdminExamRecord[] = [];
-
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            const id = docSnap.id;
-            const totalQ = data.totalQuestions || 25;
-            const score = typeof data.score === 'number' ? data.score : (data.netScore || 0);
-            const percentage = typeof data.accuracy === 'number' 
-              ? data.accuracy 
-              : (totalQ > 0 ? Math.round((score / totalQ) * 100) : 0);
-
-            firestoreExams.push({
-              id,
-              studentName: data.userName || (data.userEmail ? data.userEmail.split('@')[0] : 'विद्यार्थी'),
-              studentEmail: data.userEmail || (data.userId && data.userId.includes('@') ? data.userId : ''),
-              quizTitle: data.quizTitle || 'बैंकिङ परीक्षा सेट',
-              quizId: data.quizId || '',
-              totalQuestions: totalQ,
-              attemptedCount: data.attemptedCount || totalQ,
-              correctAnswers: data.correctAnswers || 0,
-              incorrectAnswers: data.incorrectAnswers || 0,
-              score: Math.round(score * 100) / 100,
-              percentage: Math.min(100, Math.max(0, percentage)),
-              timeTakenSeconds: data.timeTakenSeconds || data.timeElapsedSeconds || 240,
-              timestamp: this.parseDate(data.submittedAt || data.timestamp),
-              category: data.category || 'General Banking'
-            });
-          });
-
-          // Also check server-synced exam submissions if available
-          fetch('/api/tracking/exam-submissions')
-            .then(res => res.json())
-            .then(data => {
-              if (data && data.submissions && Array.isArray(data.submissions)) {
-                for (const item of data.submissions) {
-                  if (!firestoreExams.some(e => e.id === item.id)) {
-                    firestoreExams.push({
-                      id: item.id || `srv-${Date.now()}`,
-                      studentName: item.userName || 'विद्यार्थी',
-                      studentEmail: item.userEmail || '',
-                      quizTitle: item.quizTitle || 'बैंकिङ परीक्षा',
-                      quizId: item.quizId || '',
-                      totalQuestions: item.totalQuestions || 25,
-                      attemptedCount: item.attemptedCount || 25,
-                      correctAnswers: item.correctAnswers || 0,
-                      incorrectAnswers: item.incorrectAnswers || 0,
-                      score: item.score || 0,
-                      percentage: item.accuracy || 0,
-                      timeTakenSeconds: item.timeTakenSeconds || 300,
-                      timestamp: item.timestamp || new Date().toISOString(),
-                      category: item.category || 'General'
-                    });
-                  }
-                }
-              }
-            })
-            .catch(() => {})
-            .finally(() => {
-              // Merge with local baseline
-              const idMap = new Map<string, AdminExamRecord>();
-              for (const ex of initialBaseline) {
-                idMap.set(ex.id, ex);
-              }
-              for (const ex of firestoreExams) {
-                idMap.set(ex.id, ex);
-              }
-
-              const merged = Array.from(idMap.values()).sort((a, b) => {
-                return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
-              });
-
-              onUpdate(merged);
-            });
-        },
-        (error) => {
-          console.warn('Firestore exam_submissions notice (using baseline):', error.message);
-          onUpdate(initialBaseline);
-        }
-      );
-
-      return () => {
-        isUnsubscribed = true;
-        unsubscribe();
-      };
+      unsubFsSubs = onSnapshot(q, (snapshot) => {
+        if (isUnsubscribed) return;
+        const list: AdminExamRecord[] = [];
+        snapshot.forEach(docSnap => {
+          list.push(mapDocData(docSnap.id, docSnap.data()));
+        });
+        firestoreSubmissions = list;
+        emitMerged();
+      }, (error) => {
+        console.warn('Firestore exam_submissions notice:', error.message);
+      });
     } catch (err) {
       console.warn('Could not attach Firestore exam_submissions listener:', err);
-      return () => {
-        isUnsubscribed = true;
-      };
     }
+
+    // 6. Server-synced submissions check
+    fetch('/api/tracking/exam-submissions')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.submissions && Array.isArray(data.submissions)) {
+          serverExams = data.submissions.map((item: any) => mapDocData(item.id || `srv-${Date.now()}`, item));
+          emitMerged();
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/tracking/global-exam-results')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.results && Array.isArray(data.results)) {
+          const list = data.results.map((item: any) => mapDocData(item.id || `srv-${Date.now()}`, item));
+          serverExams = [...serverExams, ...list];
+          emitMerged();
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isUnsubscribed = true;
+      if (typeof unsubRtdbGlobal === 'function') unsubRtdbGlobal();
+      if (typeof unsubRtdbSubs === 'function') unsubRtdbSubs();
+      if (typeof unsubRtdbUsers === 'function') unsubRtdbUsers();
+      if (typeof unsubFsGlobal === 'function') unsubFsGlobal();
+      if (typeof unsubFsSubs === 'function') unsubFsSubs();
+    };
+  }
+
+  /**
+   * Helper to map an AdminExamRecord into an AdminAnalyticsRecord for display in Admin CMS
+   */
+  static mapExamRecordToAnalyticsRecord(r: AdminExamRecord): AdminAnalyticsRecord {
+    const totalQ = r.totalQuestions || 25;
+    const correct = r.correctAnswers || 0;
+    const incorrect = r.incorrectAnswers || 0;
+    const skipped = r.skippedCount ?? Math.max(0, totalQ - (correct + incorrect));
+    const neg = r.negativeDeduction ?? Number((incorrect * 0.2).toFixed(2));
+    const net = r.netScore ?? r.score;
+    const acc = r.accuracy ?? r.percentage;
+    const time = r.timeElapsedSeconds ?? r.timeTakenSeconds;
+
+    return {
+      id: r.id,
+      userId: r.userId || r.studentEmail || r.studentName,
+      userName: r.studentName,
+      district: r.district || 'काठमाडौँ',
+      targetExam: r.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४',
+      quizId: r.quizId || 'exam-set',
+      quizTitle: r.quizTitle,
+      category: r.category || 'General Banking',
+      totalQuestions: totalQ,
+      attemptedCount: r.attemptedCount || (correct + incorrect),
+      skippedCount: skipped,
+      correctAnswers: correct,
+      incorrectAnswers: incorrect,
+      negativeDeduction: neg,
+      netScore: net,
+      accuracy: acc,
+      timeElapsedSeconds: time,
+      timestamp: r.timestamp
+    };
   }
 
   /**

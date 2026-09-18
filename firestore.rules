@@ -1,12 +1,26 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users collection - synchronized user profiles
+    // Users collection - synchronized user profiles and subcollections
     match /users/{userId} {
       allow read: if true;
       allow write: if true;
     }
+    match /users/{userId}/{allSubcollections=**} {
+      allow read, write: if true;
+    }
     
+    // Global exam results & submissions for all users (guests and authenticated)
+    match /global_exam_results/{resultId} {
+      allow read, write: if true;
+    }
+    match /exam_submissions/{submissionId} {
+      allow read, write: if true;
+    }
+    match /exam_scores/{scoreId} {
+      allow read, write: if true;
+    }
+
     // Analytics & visitor logs
     match /analytics/{docId} {
       allow read, write: if true;
@@ -21,12 +35,6 @@ service cloud.firestore {
       allow read, write: if true;
     }
     match /download_events/{downloadId} {
-      allow read, write: if true;
-    }
-    match /exam_scores/{scoreId} {
-      allow read, write: if true;
-    }
-    match /exam_submissions/{submissionId} {
       allow read, write: if true;
     }
   }

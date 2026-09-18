@@ -16,33 +16,39 @@ const STORAGE_KEYS = {
 
 export class ActivityTrackingService {
   /**
-   * Helper to resolve currently authenticated user details safely
+   * Helper to resolve user details safely for both authenticated and guest users
    */
   private static resolveUserDetails(user?: Partial<UserProfile> | null): {
     uid: string;
     email: string;
     displayName: string;
+    district: string;
+    targetExam: string;
+    isGuest: boolean;
     isValid: boolean;
   } {
     const authUser = auth?.currentUser;
-    const email = (user && !user.isGuest && user.email)
-      ? user.email.trim()
-      : (authUser?.email || '');
+    const isGuest = Boolean(user?.isGuest || (!user && !authUser));
+    const email = user?.email?.trim() || authUser?.email || '';
+    
+    // Provide a consistent user identifier
+    let uid = user?.authUid || user?.id || authUser?.uid || '';
+    if (!uid) {
+      uid = email ? `usr-${email.split('@')[0]}` : (isGuest ? `guest-${Math.random().toString(36).substring(2, 9)}` : 'std-student');
+    }
 
-    const uid = (user && !user.isGuest && (user.authUid || user.id))
-      ? (user.authUid || user.id)!
-      : (authUser?.uid || '');
+    const displayName = user?.displayName || user?.name || authUser?.displayName || (email ? email.split('@')[0] : (isGuest ? 'अतिथि परीक्षार्थी' : 'विद्यार्थी'));
+    const district = user?.district || 'काठमाडौँ';
+    const targetExam = user?.targetExam || 'नेपाल राष्ट्र बैंक - सहायक ४';
 
-    const displayName = (user && !user.isGuest && (user.displayName || user.name))
-      ? (user.displayName || user.name)!
-      : (authUser?.displayName || (email ? email.split('@')[0] : 'विद्यार्थी'));
-
-    const isValid = Boolean(email || uid);
     return {
-      uid: uid || (email ? `usr-${email.split('@')[0]}` : 'anonymous_student'),
+      uid,
       email,
       displayName,
-      isValid
+      district,
+      targetExam,
+      isGuest,
+      isValid: true // All users (both guest & authenticated) are valid for tracking
     };
   }
 
@@ -377,9 +383,17 @@ export class ActivityTrackingService {
     // 2. Real-time logging to Firebase Realtime Database
     try {
       if (rtdb) {
-        const subRef = push(ref(rtdb, 'exam_submissions'));
+        // Global path readable by Admin CMS
+        const globalRef = ref(rtdb, `global_exam_results/${submission.id}`);
+        set(globalRef, submission).catch((err) => console.warn('RTDB global_exam_results write notice:', err));
+
+        // Submissions path
+        const subRef = ref(rtdb, `exam_submissions/${submission.id}`);
         set(subRef, submission).catch(() => {});
-        if (resolved.uid && resolved.uid !== 'anonymous_student') {
+
+        // User-specific path
+        if (resolved.uid) {
+          set(ref(rtdb, `users/${resolved.uid}/exam_results/${submission.id}`), submission).catch(() => {});
           set(ref(rtdb, `users/${resolved.uid}/latestSubmission`), submission).catch(() => {});
         }
       }
@@ -387,18 +401,27 @@ export class ActivityTrackingService {
       console.warn('Realtime Database exam submission log warning:', rtdbErr);
     }
 
-    // 3. Real-time logging to Firestore `exam_submissions` collection
+    // 3. Real-time logging to Firestore `global_exam_results` and `exam_submissions` collections
     try {
       if (db) {
-        await addDoc(collection(db, 'exam_submissions'), submission);
+        addDoc(collection(db, 'global_exam_results'), submission).catch(() => {});
+        addDoc(collection(db, 'exam_submissions'), submission).catch(() => {});
+        if (resolved.uid) {
+          addDoc(collection(db, `users/${resolved.uid}/exam_results`), submission).catch(() => {});
+        }
       }
     } catch (fsErr) {
       console.warn('Firestore exam_submissions recording warning:', fsErr);
     }
 
-    // 4. Dual sync to backend API endpoint
+    // 4. Dual sync to backend API endpoints
     try {
       fetch('/api/tracking/exam-submission', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(submission),
+      }).catch(() => {});
+      fetch('/api/tracking/global-exam-result', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(submission),

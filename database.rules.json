@@ -1,0 +1,39 @@
+{
+  "rules": {
+    ".read": true,
+    ".write": true,
+    "users": {
+      ".read": true,
+      "$uid": {
+        ".read": true,
+        ".write": true,
+        "exam_results": {
+          ".read": true,
+          ".write": true
+        }
+      }
+    },
+    "global_exam_results": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["timestamp", "userId", "score"]
+    },
+    "exam_submissions": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["timestamp", "userId", "score"]
+    },
+    "exam_scores": {
+      ".read": true,
+      ".write": true
+    },
+    "user_activities": {
+      ".read": true,
+      ".write": true
+    },
+    "download_events": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}

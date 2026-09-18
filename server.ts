@@ -759,6 +759,22 @@ app.get("/api/tracking/exam-submissions", (_req, res) => {
   res.json({ success: true, submissions: examSubmissionsList });
 });
 
+app.post("/api/tracking/global-exam-result", (req, res) => {
+  const record = req.body;
+  if (record && (record.userId || record.id)) {
+    const exists = examSubmissionsList.some(r => r.id === record.id);
+    if (!exists) {
+      examSubmissionsList.unshift(record);
+      if (examSubmissionsList.length > 500) examSubmissionsList.pop();
+    }
+  }
+  res.json({ success: true });
+});
+
+app.get("/api/tracking/global-exam-results", (_req, res) => {
+  res.json({ success: true, results: examSubmissionsList });
+});
+
 // Sangathit Sastha 50 Sets Bulk Database APIs
 const DATA_SETS_FILE = path.join(process.cwd(), "public", "data", "allFiftySets.json");
 
